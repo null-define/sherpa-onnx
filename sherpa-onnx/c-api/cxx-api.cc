@@ -398,6 +398,9 @@ GeneratedAudio OfflineTts::Generate(const std::string &text,
   }
 
   GeneratedAudio ans;
+  if (!audio) {
+    return ans;
+  }
   ans.samples = std::vector<float>{audio->samples, audio->samples + audio->n};
   ans.sample_rate = audio->sample_rate;
 

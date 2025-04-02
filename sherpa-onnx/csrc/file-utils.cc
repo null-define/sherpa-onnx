@@ -8,6 +8,18 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <stdexcept>
+#include <cstdint>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include "sherpa-onnx/csrc/macros.h"
 
@@ -24,10 +36,82 @@ void AssertFileExists(const std::string &filename) {
   }
 }
 
-std::vector<char> ReadFile(const std::string &filename) {
-  std::ifstream input(filename, std::ios::binary);
-  std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
-  return buffer;
+
+
+std::vector<char> ReadFile(const std::string& filename) {
+    std::vector<char> buffer;
+
+#ifdef _WIN32
+    // Windows implementation using CreateFileMapping
+    HANDLE hFile = CreateFileA(filename.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart < 0) {
+        CloseHandle(hFile);
+        throw std::runtime_error("Invalid file size: " + filename);
+    }
+    size_t size = static_cast<size_t>(fileSize.QuadPart);
+
+    if (size > 0) {
+        HANDLE hMapping = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (!hMapping) {
+            CloseHandle(hFile);
+            throw std::runtime_error("Failed to create file mapping: " + filename);
+        }
+
+        void* mapped = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+        if (!mapped) {
+            CloseHandle(hMapping);
+            CloseHandle(hFile);
+            throw std::runtime_error("Failed to map view of file: " + filename);
+        }
+
+        // Copy to vector
+        buffer.assign(static_cast<char*>(mapped),
+                     static_cast<char*>(mapped) + size);
+
+        // Cleanup
+        UnmapViewOfFile(mapped);
+        CloseHandle(hMapping);
+    }
+    CloseHandle(hFile);
+
+#else
+    // Unix-like (Mac/Linux/Android) implementation using mmap
+    int fd = open(filename.c_str(), O_RDONLY);
+    if (fd == -1) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        close(fd);
+        throw std::runtime_error("Failed to get file size: " + filename);
+    }
+    size_t size = static_cast<size_t>(st.st_size);
+
+    if (size > 0) {
+        void* mapped = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped == MAP_FAILED) {
+            close(fd);
+            throw std::runtime_error("Failed to map file: " + filename);
+        }
+
+        // Copy to vector
+        buffer.assign(static_cast<char*>(mapped),
+                     static_cast<char*>(mapped) + size);
+
+        // Cleanup
+        munmap(mapped, size);
+    }
+    close(fd);
+#endif
+
+    return buffer;
 }
 
 #if __ANDROID_API__ >= 9
